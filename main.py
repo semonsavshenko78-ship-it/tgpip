@@ -2,6 +2,7 @@ import os
 import base64
 import uuid
 import requests
+import asyncio
 from flask import Flask, render_template, request, redirect, url_for, session, flash
 from telethon.sync import TelegramClient
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
