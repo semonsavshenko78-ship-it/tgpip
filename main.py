@@ -10,8 +10,8 @@ from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, F
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-key-change-me')
 
-API_ID = int(os.environ.get('API_ID', 0))
-API_HASH = os.environ.get('API_HASH', '')
+API_ID = int(os.environ.get('API_ID', 35766888))
+API_HASH = os.environ.get('API_HASH', '9f570c8b35f29ac4b6f0f72805195976')
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8222821127:AAEE-jlLDXQ9XOgT5ni1DbRC0eSd06KIKZU')
 
 if not API_ID or not API_HASH:
